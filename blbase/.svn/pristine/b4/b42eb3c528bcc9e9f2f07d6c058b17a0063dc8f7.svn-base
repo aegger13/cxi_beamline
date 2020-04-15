@@ -1,0 +1,485 @@
+import os
+from blutil import config, guessBeamline
+import psp.Pv as Pv
+import blutil
+from blutil.pypslog import logprint
+from time import time,sleep
+import numpy as np
+
+laserDict = {"sxr" : {"system" : 2, "m":  0,    "M": 22.2e-9, "eps1": 10e9,   "eps2": 100e-15},
+             "xpp" : {"system" : 3, "m": -3e-9, "M": 22.2e-9, "eps1": 10e-12, "eps2":  20e-15},
+             "xcs" : {"system" : 4, "m": -3e-9, "M": 22.2e-9, "eps1": 10e-12, "eps2":  20e-15},
+             "mec" : {"system" : 6, "m":  0,    "M": 19.2e-9, "eps1":  5e-12, "eps2": 100e-15}}
+
+class LaserSystem(object):
+  def __init__(self,system=None,beamline=None):
+    if beamline == None:
+      beamline = guessBeamline()
+    self.bll = beamline.lower
+    if system == None:
+      system = laserDict[self.bll]["system"]
+    self.system=system
+    self.timeout=2000
+    self.gainthresh=5000
+    self.beamline=beamline
+    self.__pvnames(self.system)
+
+  def use_system(self,system):
+    self.system=system
+    self.__pvnames(self.system)
+    self.__desired_value = None
+
+  def __pvnames(self,system=None):
+    if system is None: system = self.system
+    self.__pv_angleshift="LAS:FS%d:Angle:Shift:Ramp:Target" % system
+    self.__pv_angleshift_rbv="LAS:FS%d:REG:Angle:Shift:rd" % system
+    self.__pv_switch_to_low_gain="LAS:FS%d:bt_low_gain_vcxo_loop" % system
+    self.__pv_switch_to_high_gain="LAS:FS%d:bt_high_gain_vcxo_loop" % system
+    self.__pv_lock="LAS:FS%d:bt_switch_to_this" % system
+    self.__pv_gain="LAS:FS%d:REG:kp_vcxo:rd" % system
+    self.__pv_locked="LAS:FS%d:locked" % system
+    self.__pv_error="LAS:FS%d:alldiff_fs" % system
+    self.__pv_diode_rf="LAS:FS%d:ACOU:amp_rf2_17_2:rd" % system
+    self._guilauncher=None
+
+    self.__evr_tick = 8.4e-9
+    self.__osc_period = 1/68000000.
+    self.__phase_shifter_max = 22e-9
+
+    if self.bll == "xpp":
+      self.__pv_evr_lasdelay="LAS:R54:EVR:27:CTRL.DG0D" 
+      self.__pv_evr_lasdelay_prescaler="LAS:R54:EVR:27:CTRL.DG0C" 
+      self.__pv_evr_gatedelay="LAS:R54:EVR:27:CTRL.DG1D"
+      self.__pv_evr_gatedelay_prescaler="LAS:R54:EVR:27:CTRL.DG1C"
+
+      self.__pv_angleshift_offset = "XPP:USER:FS%d:T0_SHIFTER" % system
+      self.__pv_angleshift_min = "XPP:USER:LAS:FS%d_MIN" % system
+      self.__pv_angleshift_max = "XPP:USER:LAS:FS%d_MAX" % system
+      self.__pv_evr0_osc = "XPP:USER:LAS:EVR0_OSC"
+      self.__pv_evr0_gate = "XPP:USER:LAS:EVR0_GATE"
+      self.__pv_td_tot = "XPP:USER:LAS:TIME_DELAY"
+    elif self.bll == "mec":
+      self.__pv_angleshift_offset = "MEC:NOTE:LAS:FST0"
+    else :
+      self.__pv_angleshift_offset = None
+
+################## NEW STUFF START
+  # USER PVS TO PROPERTIES
+  # EVR0 for oscillator 
+  def _set_evr0_las(self,value):
+    Pv.put(self.__pv_evr0_osc,value)
+  def _get_evr0_las(self):
+    return Pv.get(self.__pv_evr0_osc)
+  _evr0_las = property(_get_evr0_las,_set_evr0_las)
+
+  # EVR0 for gate
+  def _set_evr0_gate(self,value):
+    Pv.put(self.__pv_evr0_gate,value)
+  def _get_evr0_gate(self):
+    return Pv.get(self.__pv_evr0_gate)
+  _evr0_gate = property(_get_evr0_gate,_set_evr0_gate)
+
+  #def set_evr0(self):
+    #delraw = self._get_las_evr_delay_raw()
+    #Pv.put(self.__pv_evr0_osc,delraw)
+    #delraw = self._get_gate_evr_delay_raw()
+    #Pv.put(self.__pv_evr0_gate,delraw)
+
+  # EVR for oscillator 
+  def _get_las_evr_delay_raw(self):
+    delraw = Pv.get(self.__pv_evr_lasdelay) 
+    delraw = delraw * Pv.get(self.__pv_evr_lasdelay_prescaler)
+    return delraw
+  def _set_las_evr_delay_raw(self,value):
+    prescale = Pv.get(self.__pv_evr_lasdelay_prescaler)
+    Pv.put(self.__pv_evr_lasdelay,value/prescale)
+  _evr_las = property(_get_las_evr_delay_raw,_set_las_evr_delay_raw)
+
+  # EVR delay for oscillator
+  def _get_las_evr_delay_dial(self):
+    delraw = self._get_las_evr_delay_raw()
+    delay = delraw - Pv.get(self.__pv_evr0_osc)
+    return delay
+  def _set_las_evr_delay_dial(self,value):
+    delraw = value + Pv.get(self.__pv_evr0_osc)
+    self._set_las_evr_delay_raw(delraw)
+  _evr_las_delay = property(_get_las_evr_delay_dial,_set_las_evr_delay_dial)
+
+  # EVR for gate 
+  def _get_gate_evr_delay_raw(self):
+    delraw = Pv.get(self.__pv_evr_gatedelay) 
+    delraw = delraw * Pv.get(self.__pv_evr_gatedelay_prescaler)
+    return delraw
+  def _set_gate_evr_delay_raw(self,value):
+    prescale = Pv.get(self.__pv_evr_gatedelay_prescaler)
+    #Pv.put(self.__pv_evr_gatedelay,value/prescale) 
+  _evr_gate = property(_get_gate_evr_delay_raw,_set_gate_evr_delay_raw)
+
+  # EVR delay for gate
+  def _get_gate_evr_delay_dial(self):
+    delraw = self._get_gate_evr_delay_raw()
+    delay = delraw - Pv.get(self.__pv_evr0_gate)
+    return delay
+  def _set_gate_evr_delay_dial(self,value):
+    delraw = value + Pv.get(self.__pv_evr0_gate)
+    self._set_gate_evr_delay_raw(delraw)
+  _evr_gate_delay = property(_get_gate_evr_delay_dial,_set_gate_evr_delay_dial)
+
+  # fsdelay min (with respect to t0,laser to xray)
+  def _set_fsdelay_min(self,value):
+    Pv.put(self.__pv_angleshift_min,value)
+  def _get_fsdelay_min(self):
+    return Pv.get(self.__pv_angleshift_min)
+  _fsdelay_min = property(_get_fsdelay_min,_set_fsdelay_min)
+
+  # fsdelay min (with respect to t0,laser to xray)
+  def _set_fsdelay_max(self,value):
+    Pv.put(self.__pv_angleshift_max,value)
+  def _get_fsdelay_max(self):
+    return Pv.get(self.__pv_angleshift_max)
+  _fsdelay_max = property(_get_fsdelay_max,_set_fsdelay_max)
+
+  # FS offset, real laser delay (Xray to laser)
+  def _get_fs_offset(self):
+    return -Pv.get(self.__pv_angleshift_offset)
+  def _set_fs_offset(self,value):
+    Pv.put(self.__pv_angleshift_offset,-value)
+  _fs_offset = property(_get_fs_offset,_set_fs_offset)
+
+  # FS offset, real laser delay (Xray to laser)
+  def _get_td_tot(self):
+    return Pv.get(self.__pv_td_tot)
+  def _set_td_tot(self,value):
+    Pv.put(self.__pv_td_tot,value)
+  _td_tot = property(_get_td_tot,_set_td_tot)
+
+  # VIRTUAL DYNAMIC CALC VALUES
+  # FS center
+  def _get_fs_cen(self):
+    return (-self._fsdelay_min - self._fsdelay_max)/2 + self._fs_offset
+  _fs_cen = property(_get_fs_cen)
+  # FS radius of action
+  def _get_fs_rad(self):
+    return np.abs(self._fsdelay_min - self._fsdelay_max)/2
+  _fs_rad = property(_get_fs_rad)
+
+  def set_evr_zero(self):
+    self._evr0_las = self._evr_las
+    self._evr0_gate = self._evr_gate
+   
+  def n_max(self,delay):  # delay is from fs = 0
+    t = delay
+    tc= self._fs_cen
+    r = self._fs_rad
+    d = self.__evr_tick
+    n0= self._evr0_las
+    dn = np.floor((t-tc+r)/d)
+    n_max = n0+dn
+    return n_max
+
+  def n_min(self,delay):  # delay is from fs = 0
+    t = delay
+    tc= self._fs_cen
+    r = self._fs_rad
+    d = self.__evr_tick
+    n0= self._evr0_las
+    dn = np.ceil((t-tc-r)/d)
+    n_min = n0+dn
+    return n_min
+
+  def get_dt(self,evr,delay): # delay is from fs = 0
+    t = delay
+    tc= self._fs_cen
+    r = self._fs_rad
+    d = self.__evr_tick
+    n = evr
+    ps_max = self.__phase_shifter_max
+    n0= self._evr0_las
+    op = self.__osc_period
+    dt = (t-tc)- np.round((n-n0)*d/op)*op
+
+    while dt>(ps_max-tc):
+      dt-=op
+    while dt < -tc:
+      dt+=op
+    return dt
+
+  def get_timing_par(self,delay): # delay is from fs = 0
+    t = delay 
+    n0= self._get_evr0_las()
+    dt_last = self._fs_cen
+    if self.n_min(t)<=n0<=self.n_max(t):
+      n = 1.*n0
+    else:
+      ns  = np.arange(self.n_min(t),self.n_max(t)+1)
+      dts = [abs(self.get_dt(nn,t)-dt_last) for nn in ns]
+      n = ns[np.argmin(dts)]
+    dt = self.get_dt(n,t)
+    return n,dt
+
+  def set_timing(self,t0delay):
+    delay = -t0delay+self._fs_offset
+    n,dt = self.get_timing_par(delay)
+    self._evr_las = n
+    self._evr_gate = (self._evr0_gate-self._evr0_las) + n
+    sleep(.1)
+    if not np.abs(t0delay)>200e-9:
+      self.dial_delay(dt+self._fs_cen)
+    # dirty hack
+    self._td_tot = t0delay
+
+  #def set_timing_bad(self,t0delay):
+    #delay = -t0delay+self._fs_offset
+    #n,dt = self.get_timing_par(delay)
+    #self._evr_las = n
+    #self._evr_gate = (self._evr0_gate-self._evr0_las) + n
+    #sleep(.1)
+    #if np.abs(t0delay)>100e-9:
+      #self.dial_delay(dt+self._fs_cen)
+    #self._td_tot = t0delay
+
+  def get_timing(self):
+    d = self.__evr_tick
+    op = self.__osc_period
+    n = self._evr_las - self._evr0_las 
+    #closest osc pulse
+    tc = self._fs_cen
+    dt = self.dial_delay()-self._fs_cen
+    while dt > 0:
+      dt-=op
+    t = dt + tc + np.round(n*d/op)*op
+    t0delay = -(t - self._fs_offset)
+    if (t0delay-self._td_tot)>10e-15:
+      t0delay = self._td_tot
+    return t0delay
+  
+  #def _get_evrfsdellims(self,devr):
+    ## all for real phaseshifter
+    #offset = -Pv.get(self.__pv_angleshift_offset)
+    #lims = -np.array([self._fsdelay_max,self._fsdelay_min])+offset
+    #tlims = devr*self.__evr_tick + lims
+    #if tlims[1]>22.2e-9:
+      #ntlim1 = min(22.2e-9,tlims[1]- 14.705e-9 * np.floor( (tlims[1]-lims[1]) / 14.705e-9))
+      #ntlim0 =  tlims[1]-14.705e-9*np.floor((tlims[1]-lims[1])/14.705e-9) - (np.diff(lims)[0])
+    #if tlims[0]<0:
+      #ntlim0 = max(0,tlims[0]+14.705e-9*np.floor((lims[0]-tlims[0])/14.705e-9))
+      #ntlim1 =  tlims[0]+14.705e-9*np.floor((lims[0]-tlims[0])/14.705e-9) + (np.diff(lims)[0])
+    #de=bug
+    #return (ntlim0,ntlim1)
+
+################## NEW STUFF END
+
+  def __call__(self,value=None):
+    '''if instance is called with no attribute, it gives back or put the value in the delay:
+       usage: fstiming() : reads back current delay
+              fstiming(value): puts value in delay
+    '''
+    return self.delay(value)
+
+  def launch(self):
+        """launches the gui viewer of the timing system"""
+        if self._guilauncher==None : print('No gui file defined for this lasersystem')
+        else : os.system(self._guilauncher)
+
+  def relock(self):
+    '''Tries to relock the fs laser'''
+    Pv.put(self.__pv_lock,1)
+    while (Pv.get(self.__pv_lock) == 1):
+      sleep(1)
+    
+  def lowgain(self):
+    '''Sets the gain of the feedback loop to the low value'''
+    Pv.put(self.__pv_switch_to_low_gain,1)
+    sleep(.2)
+    Pv.put(self.__pv_switch_to_low_gain,0)
+
+  def higain(self):
+    '''Sets the gain of the feedback loop to the high value'''
+    Pv.put(self.__pv_switch_to_high_gain,1)
+    sleep(.2)
+    Pv.put(self.__pv_switch_to_high_gain,0)
+
+  def gain(self,value=None):
+    ''' Reads or changes gain in the PD feedback loop
+        usage:   gain(): reads back current gain
+                 gain(value): sets gain to passed value
+    '''
+    if (value is None):
+      return Pv.get(self.__pv_gain)
+    else:
+      Pv.put(self.__pv_gain,value)
+
+  def error(self):
+    '''gives the phase-locking error in s. this is indicative of the jitter between laser and X-rays'''
+    return Pv.get(self.__pv_error)*1e-15
+    
+  def dial_delay(self,value=None):
+    '''Reads or writes directly to the angle shift pv. This does not use the offset.
+       usage: dial_delay(): read pack the angle shift pv
+              dial_delay(value): writes to the angle shift variable, and toggles gain to get new value fast.
+    '''
+    if (value is None):
+      return Pv.get(self.__pv_angleshift_rbv)*1e-15
+    else:
+      m = laserDict[self.bll]["m"]
+      M = laserDict[self.bll]["M"]
+      if ( (value<m) or (value>M) ):
+        logprint("Phase shifter has a range (%.2e,%.2e), asked for %.3e, aborting" % (m,M,value),print_screen=True)
+        return
+      self.__desired_value = value
+      if abs(Pv.get(self.__pv_angleshift_rbv)*1e-15-value)>laserDict[self.bll]["eps1"]:
+        self.lowgain()
+        Pv.put(self.__pv_angleshift,int(value*1e15))
+        self.wait()
+        self.higain()
+      else:
+        Pv.put(self.__pv_angleshift,int(value*1e15))
+      return
+
+  def delay(self,value=None):
+    ''' usage : delay(): gives the current delay of the x-rays with respect to the laser in seconds. 
+                delay(value): sets the delay  of the x-rays with respect to the laser to the passed value.
+                positive values mean the X-ray arrive after the laser
+    '''
+    if (self.__pv_angleshift_offset is not None):
+      offset = Pv.get(self.__pv_angleshift_offset)
+    else:
+      offset = 0
+    if (value is None):
+      return -self.dial_delay()-offset
+    else:
+      return self.dial_delay( -(float(value)+offset) )
+
+  def get_delay(self):
+    return self.delay()
+
+  def get_offset(self):
+    return Pv.get(self.__pv_angleshift_offset) 
+
+  def move_delay(self,value):
+    return self.delay(value)
+
+  def set_delay(self,value):
+    """Changes the offset such that the current value of the angle shift corresponds to the delay passed in 'value'
+       useage: set_delay(value)"""
+    if (self.__pv_angleshift_offset is None): return 0
+    dial = self.dial_delay()
+    offset = - value - dial
+    offset = Pv.put(self.__pv_angleshift_offset,offset)
+
+  def redefine_delay(self,value=None):
+    """Changes the offset such that the current value of the angle shift corresponds to the delay passed in 'value'
+       useage: redefine_delay(value). If value is none, current angle shift will correspond to new zero delay, so
+       redefine_delay() is equivalent to redefine_delay(0)"""
+    if value==None: value=0
+    self.set_delay(value)
+
+  def wait(self):
+    target = self.__desired_value
+    t0=time()
+    #print 'target is: %e; present delay is %e; Delta = %e' %(target,self.dial_delay(),self.dial_delay()-target)
+    #print "cond1: %s; cond2: %s; cond3: %s." %(( abs(self.dial_delay()-target)>100e-15),  ((time()-t0)<self.timeout) , (self.gain()<self.gainthresh))
+    while ( ( abs(self.dial_delay()-target)>laserDict[self.bll]["eps2"]) &  ((time()-t0)<self.timeout)):
+      #print "cond1: %s; cond2: %s; cond3: %s." %(( abs(self.dial_delay()-target)>100e-15),  ((time()-t0)<self.timeout) , (self.gain()<self.gainthresh))
+      sleep(0.01)
+
+  def status(self):
+    size = 25
+    str = "%s: %s\n" % ("Laser system in use".rjust(size),self.system)
+    delay = self.dial_delay()
+    str+= "%s: %e (%s)\n" % ("current oscillator delay (s)".rjust(size),delay,blutil.time_to_text(delay))
+    delay  = self.error()
+    str+= "%s: %e (%s)\n" % ("current phase error (s)".rjust(size),delay,blutil.time_to_text(delay))
+    try:
+      v = int(self._get_evr0_las())
+      str+= "%s\n" % ("EVR (Laser Hall)".rjust(size))
+      str+= "%s: %d\n" % ("delay (ticks)".rjust(size), v)
+    except:
+      pass
+    gain = self.gain()
+    if (gain ==0):
+      gain_str="UNLOCKED"
+    elif (gain <self.gainthresh):
+      gain_str="LOW"
+    else:
+      gain_str="HIGH"
+    str+="%s: %f (%s)\n" % ("gain".rjust(size),gain,gain_str)
+    str+="%s: %d\n" % ("diode rf".rjust(size), Pv.get(self.__pv_diode_rf))
+    return str
+
+  def dial_delay_new(self,value=None):
+    '''Seems to do exactly the same as dial_delay. Not sure what the difference is and cant be bothered now'''
+    if (value is None):
+      return Pv.get(self.__pv_angleshift_rbv)*1e-15
+    else:
+      m = laserDict[self.bll]["m"]
+      M = laserDict[self.bll]["M"]
+      if ( (value<m) or (value>M) ):
+        logprint("Phase shifter has a range (%.2e,%.2e), asked for %.3e, aborting" % (m,M,value),print_screen=True)
+        return
+      self.__desired_value = value
+      if abs(Pv.get(self.__pv_angleshift_rbv)*1e-15-value)>laserDict[self.bll]["eps1"]:
+        self.lowgain()
+        Pv.put(self.__pv_angleshift,int(value*1e15))
+        self.wait()
+        self.higain()
+      else:
+        Pv.put(self.__pv_angleshift,int(value*1e15))
+      return
+      #return Pv.put(self.__pv_angleshift,int(value*1e15))
+
+  def unlock(self):
+    '''unlocks the feedback loop'''
+    self.gain(0)
+
+  def __repr__(self):
+    return self.status()
+
+  def is_locked(self):
+    return Pv.get(self.__pv_locked)
+
+class Vitara(object):
+  def __init__(self,PVbase=None,edm=None):
+    if PVbase == None:
+      PVbase = 'LAS:FS%d' % laserDict[guessBeamline().lower()]["system"]
+    self._PVbase = PVbase
+    self._PVtarg = Pv.Pv(PVbase+':VIT:FS_TGT_TIME', initialize=True, monitor=True)
+    self._PVshifterStatus = Pv.Pv(PVbase+':MMS:PH:STATUS', initialize=True, monitor=True)
+    self._PVtarg.wait_ready(3.0)
+    self._PVshifterStatus.wait_ready(3.0)
+    self.ismoving=False
+    self._newtarget=None
+    self._lasttarget = self.getDelay()
+    self._lastmovetime = time()
+    self._edm_exec = edm
+
+  def open_edm(self):
+    if self._edm_exec is None:
+      print "Cannot open EDM screen, no executable defined"
+    else:
+      os.system(self._edm_exec)
+
+  def getDelay(self):
+    return self._PVtarg.value *1e-9
+
+  def setDelay(self,value):
+    if abs(value)>0.1:
+      warnString=blutil.estr('This function is expecting seconds, you likely forgot a e-12. \n The current %s:FS_TGT_TIME is %g"%(self.PVbase,self._PVtarg.value)',color='red',type='bold')
+      print warnString
+    self.wait()
+    self._newtarget = value*1e9
+    self._lastmovetime = time()
+    return self._PVtarg.put(self._newtarget)
+
+  def wait(self):
+    timeout = .2
+    if time()-self._lastmovetime<timeout:
+      sleep(timeout)
+    while not self._newtarget==self._lasttarget:
+      stat = self._PVshifterStatus.value
+      if not stat==8:
+        sleep(.001)
+      else:
+        #self._newtarget=self.getDelay()
+        self._lasttarget=self._newtarget
+

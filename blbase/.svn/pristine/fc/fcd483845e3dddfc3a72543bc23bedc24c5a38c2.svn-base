@@ -1,0 +1,46 @@
+#!/bin/bash
+
+EDM_SCREEN="pcdsPlugins.edl"
+
+usage()
+{
+cat << EOF
+usage: $0 options <lev_pv_basename>
+
+Start an EDM for the specified leviton.
+
+OPTIONS:
+-h shows the usage information
+EOF
+}
+
+while getopts "hpe" OPTION
+do
+    case $OPTION in
+    h)
+        usage
+        exit 1
+        ;;
+    p)
+        EDM_SCREEN="pcdsPlugins.edl"
+        ;;
+    e)
+        EDM_SCREEN="gigeTop.edl"
+        ;;
+	esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ "$EDM_SCREEN" == "pcdsPlugins.edl" ]; then
+    EDM_MACRO="P=$1:"
+else
+    EDM_MACRO="P=$1,R=:,CAM=$1"
+fi
+
+# Setup edm environment
+source /reg/g/pcds/setup/epicsenv-3.14.12.sh
+export CAM_EDM_DIR=/reg/g/pcds/package/epics/3.14/ioc/common/gigECam/R1.15.1
+export EDMDATAFILES=.:${CAM_EDM_DIR}:${CAM_EDM_DIR}/gigeScreens
+
+edm -x -eolc -m "${EDM_MACRO}" "${EDM_SCREEN}" &

@@ -1,0 +1,81 @@
+"""
+File for defining devices and services we'd like to include in hutch python.
+Make sure to set everything in config before importing from this file.
+"""
+from blutil import config, estr, printnow
+
+__all__ = []
+def export(*names):
+    __all__.extend(names)
+
+def warning(text):
+    """Print text to screen in BOLD RED lettering."""
+    print estr(text, color="red", type="bold")
+
+printnow("defining lcls_linac...")
+try:
+    from blinst import linac
+    lcls_linac = linac.Linac()
+    export("lcls_linac")
+    printnow("...done\n")
+except Exception, exc:
+    lcls_linac = None
+    warning("Error loading lcls_linac!")
+    print exc
+
+printnow("defining motors...")
+try:
+    from blbase import motorsfile
+    motors = motorsfile.Motors()
+    motors.import_epicsArch(config.epicsArch)
+    m = motors.all.m
+    export("motors", "m")
+    printnow("...done\n")
+except Exception as exc:
+    motors = None
+    m = None
+    warning("Error loading motors!")
+    print exc
+
+printnow("defining attenuators...")
+try:  
+    from blinst import lusiatt
+    att_dia = lusiatt.Lusiatt("XRT:DIA:ATT")
+    att_dsb = lusiatt.Lusiatt("CXI:DSB:ATT")
+    export("att_dia", "att_dsb")
+    printnow("...done\n")
+except Exception as exc:
+    att = None
+    warning("Error loading attenuators!")
+    print exc
+
+printnow("defining daq...")
+try:
+    from blbase import daq
+    pvbase = "{0}:SCAN:".format(config.hutch.upper())
+    feedbackPVs = dict(
+        istep=(pvbase + "ISTEP",0), isscan=(pvbase + "ISSCAN",0),
+        var0=(pvbase + "SCANVAR00",""), var0_max=(pvbase + "MAX00",0),
+        var0_min=(pvbase + "MIN00",0), var1=(pvbase + "SCANVAR01",""),
+        var1_max=(pvbase + "MAX01",0), var1_min=(pvbase + "MIN01",0),
+        var2=(pvbase + "SCANVAR02",""), var2_max=(pvbase + "MAX02",0),
+        var2_min=(pvbase + "MIN02",0), Nshots=(pvbase + "NSHOTS",0),
+        Nsteps=(pvbase + "NSTEPS",0))
+    daq = daq.Daq(config.host, 4, lcls_linac, feedbackPVs)
+    export("daq")
+    printnow("...done\n")
+except Exception, exc:
+    daq = None
+    warning("Error loading daq!")
+    print exc
+
+printnow("defining epics archiver...")
+try:
+    from blutil import epicsarchive_new
+    epicsarchive = epicsarchive_new.EpicsArchive()
+    export("epicsarchive")
+    printnow("...done\n")
+except Exception, exc:
+    warning("Error loading epics archiver!")
+    print exc
+

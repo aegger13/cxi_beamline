@@ -1,0 +1,321 @@
+"""
+File for defining devices and services we'd like to include in hutch python.
+Make sure to set everything in config before importing from this file.
+"""
+import sys
+import os
+import socket
+from blutil import config, estr, printnow
+from blbase import virtualmotor
+from blutil.user import warn
+
+import matplotlib
+matplotlib.use("Qt4Agg")
+
+INSTRUMENT = 'CXI'
+
+__all__ = []
+def export(*names):
+    __all__.extend(names)
+
+def warning(text):
+    """Print text to screen in BOLD RED lettering."""
+    print estr(text, color="red", type="bold")
+
+printnow("defining lcls_linac...")
+try:
+    from blinst import linac
+    lcls_linac = linac.Linac()
+    export("lcls_linac")
+    printnow("...done\n")
+except Exception, exc:
+    lcls_linac = None
+    warning("Error loading lcls_linac!")
+    print exc
+
+printnow("defining motors...")
+try:
+    from blbase import motorsfile
+    motors = motorsfile.Motors()
+    motors.import_epicsArch(config.epicsArch)
+    printnow("  adding xrt motors")
+    motors.add(['XRT:DIA:MMS:12','pp_x'], ['XRT:DIA:MMS:15','pp_y'], group='xrt')
+    motors.add( ["CXI:DG1:MMS:01","reflaser_y"],
+                ["CXI:DG1:PIC:03","rlaser1_x"],
+                ["CXI:DG1:PIC:04","rlaser1_y"],
+                ["CXI:DG1:PIC:01","rlaser1_rx"],
+                ["CXI:DG1:PIC:02","rlaser1_ry"], 
+                group="rlaser")
+    m = motors.all.m
+    export("motors", "m")
+    printnow("...done\n")
+except Exception as exc:
+    motors = None
+    m = None
+    warning("Error loading motors!")
+    print exc
+
+printnow("defining DIA and DSB attenuators...")
+try:  
+    from blinst import lusiatt
+    att_dia = lusiatt.Lusiatt("XRT:DIA:ATT")
+    att_dsb = lusiatt.Lusiatt("CXI:DSB:ATT")
+    export("att_dia", "att_dsb")
+    printnow("...done\n")
+except Exception as exc:
+    att = None
+    warning("Error loading attenuators!")
+    print exc
+
+printnow("defining feeatt ...")
+try:	  
+  from blinst import feeatt
+  feeatt = feeatt.Feeatt(lcls_linac)
+  virtualmotor.VirtualMotor("feeA",feeatt.setTfast,feeatt.getTvalue,feeatt.wait,motorsobj=motors)
+  export("feeatt")
+  printnow("...done\n")
+except:
+  warning('there was a problem with the FEE attentuator definition!')
+
+printnow("defining feespec ...")
+try:
+  from blinst.feespec import feespec
+  printnow("...done\n")
+except:
+  warning("Error in loading feespec!")
+
+printnow("defining cxistopper ...")
+try:
+    from blbase import xraystopper
+    cxistopper = xraystopper.Xraystopper("PPS:FEH1:5:S5BSTPRSUM","cxi-xray-stopper")
+    xrtstopper = xraystopper.Xraystopper("STPR:XRT1:1:SH2_PPSSUM","xrt-xray-stopper")
+    dg1stopper=xraystopper.Xraystopper("HFX:UM6:STP_01:IN_DI_MPSC","dg1-xray-stopper")
+    dg2stopper=xraystopper.Xraystopper("HFX:DG2:STP_01:IN_DI_MPSC","dg2-xray-stopper")
+    s5stopper = xraystopper.Xraystopper("PPS:FEH1:5:S5STPRSUM","xcsmain-xray-stopper")
+    export("cxistopper","xrtstopper","dg1stopper","dg2stopper","s5stopper")
+    printnow("...done\n")
+except:
+    warn(" Problem loading stoppers")
+
+### Placeholder --needs updating
+#printnow("Loading cxi reference lasers..."),
+#try:
+#    from blinst import reflaser
+#    cxireflaser=reflaser.RefLaser(m, "CXI:REFLASER1:MIRROR", m.reflaser_y, x=m.rlaser1_x, y=m.rlaser1_y, rx=m.rlaser1_rx, ry=m.rlaser1.rx)
+#    printnow("...done\n")
+#except:
+#    warn(" Problem loading ref lasers")
+
+printnow("Loading cxi slits..."),
+# SLITS
+try:
+    from blinst.lusislit import LusiSlit
+#    s0 = xcss0 = LusiSlit(motors.s0_u,motors.s0_d,motors.s0_n,motors.s0_s,"s0")   # FEE Mask Slits
+#    xpps1 = h2s1 = LusiSlit(motors.h2s1_u,motors.h2s1_d,motors.h2s1_n,motors.h2s1_s,"xpps1")  # Slit on XPP SB1 (SXR)
+#    s1 = xcss1 = LusiSlit(motors.s1_u,motors.s1_d,motors.s1_n,motors.s1_s,"s1")
+#    s2 = xcss2 = LusiSlit(motors.s2_u,motors.s2_d,motors.s2_n,motors.s2_s,"s2")
+#    s3 = xcss3 = LusiSlit(motors.s3_u,motors.s3_d,motors.s3_n,motors.s3_s,"s3")
+#    s3m = xcss3m = LusiSlit(motors.s3m_u,motors.s3m_d,motors.s3m_n,motors.s3m_s,"s3m")
+#    s4 = xcss4 = LusiSlit(motors.s4_u,motors.s4_d,motors.s4_n,motors.s4_s,"s4")
+#    s5 = xcss5 = LusiSlit(motors.s5_u,motors.s5_d,motors.s5_n,motors.s5_s,"s5")
+#    s6 = xcss6 = LusiSlit(motors.s6_u,motors.s6_d,motors.s6_n,motors.s6_s,"s6")
+    dg1slit = LusiSlit(m.dg1slit_u,m.dg1slit_d,m.dg1slit_n,m.dg1slit_s,"dg1slit")
+    kb1slitus = LusiSlit(m.kb1slitus_u,m.kb1slitus_d,m.kb1slitus_n,m.kb1slitus_s,"kb1slitus")
+    kb1slitds = LusiSlit(m.kb1slitds_u,m.kb1slitds_d,m.kb1slitds_n,m.kb1slitds_s,"kb1slitds")
+    dg2slit = LusiSlit(m.dg2slit_u,m.dg2slit_d,m.dg2slit_n,m.dg2slit_s,"dg2slit")
+    dsbslit = LusiSlit(m.dsbslit_u,m.dsbslit_d,m.dsbslit_n,m.dsbslit_s,"dsbslit")
+    export("dg1slit","kb1slitus","kb1slitds","dg2slit","dsbslit")
+    printnow("...done\n")
+except:
+    warn(" Problem loading slits")
+
+from blinst import lusiipm
+from blinst.ipimb import ipimb
+printnow("defining ipms:")
+try:
+  ipimb_dg2 = ipimb("CXI:DG2:IMB:01","CXI:IPM:IOC","CXI:IPM:EVR:CTRL.DG2E","ipimb_dg2")
+#  ipimb3 = ipimb("XPP:SB3:IPM:01","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG3E","ipimb3")
+#  lombpm_ipimb = ipimb("XPP:MON:IPM:01","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG0E","lombpm_ipimb")
+#  lomdiode_ipimb = ipimb("XPP:MON:IPM:02","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG1E","lomdiode_ipimb")
+#  diode2_ipimb = ipimb("XPP:SB3:IPM:02","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG4E","diode2_ipimb")
+#  diode3_ipimb = ipimb("XPP:SB4:IPM:01","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG5E","diode3_ipimb")
+#  diodeU_ipimb = ipimb("XPP:USR:IPM:01","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG6E","diodeU_ipimb")
+#  diodeU2_ipimb = ipimb("XPP:USR:IPM:02","XPP:IPM:IOC","XPP:IPM:EVR:CTRL.DG7E","diodeU2_ipimb")
+except:
+    warning("one of our CXI IPIMB boxes is missing!")
+#try:
+#  printnow("xppipm2,")
+#  dg2ipm = lusiipm.IPM("XPP:SB2:IPM",
+#                        det=xppdets.ipm2,
+#                        ipimb=ipimb2,
+#                        mot_diode_x=motors.ipm2_xd,
+#			mot_diode_y=motors.ipm2_yd,
+#			mot_target_y=motors.ipm2_yt,
+#                        desc="ipm2",
+#                        show_dets=True)
+#  ipm2 = xppipm2
+#
+#  printnow("...done\n")
+#except:
+#    warning("one of our XPP IPIMB boxes is missing!")
+
+
+
+printnow("defining cxi evr ...")
+from blbase import controlevr
+xrtevr = controlevr.ControlEVR("CXI:R48:EVR:41","XRT_R48")
+cxilaserevr = controlevr.ControlEVR("LAS:R52B:EVR:31","CXI_R52B")
+cxievr_user = controlevr.ControlEVR("CXI:R52:EVR:01","CXI_R52A")
+export("xrtevr","cxilaserevr","cxievr_user")
+
+#def evr_laser_setup(evr=xppevr_scoperack.t0):
+#  evr.eventcode(40)
+#  evr.polarity(0)
+#  evr.enable()
+#  evr.width(10e-6)
+#  evr.delay(875.383e-6)
+printnow("...done\n")
+
+printnow("defining event sequencer (event) ...")
+from blbase import eventsequencer
+local_iocbase = '{:}:ECS:IOC:01'.format(INSTRUMENT)
+print local_iocbase
+try:
+  event = eventsequencer.EventSequencer( local_iocbase=local_iocbase, sequence_group=5)
+  export("event")
+  printnow("...done\n")
+
+  printnow("Loading Pulse Picker...")
+  #from pp_nogui_working import PPicker
+  # Start using default pulse picker setting of taking 2nd pulse with 8 ms delay 
+  # (instead of aggressively taking next pulse with 0.89 msec delay)
+  try:
+    from blinst.pulsepicker import PulsePicker
+    picker_codes = dict(daq=187,drop=196,pp=185,slowdaq=179,ppsingleopen=180,
+                        ppsingleclose=181,lshut=184,singleshotana=192)
+    cxipulsepicker = PulsePicker(xrtevr.t0,
+                            lcls_linac,
+                            sequencer=event,
+                            polarity="Normal",
+                            xstage=m.pp_x,
+                            ystage=m.pp_y,
+                            rotPVbase='XRT:DIA:MMS:16',
+                            presetPVbase='CXI:XRT:PP',
+#                            burstdelay=0.89e-3,
+#                            flipflopdelay=0.89e-3,
+#                            followerdelay=0.89e-3,
+                            codes=picker_codes)
+    pp = cxipulsepicker
+    export("pp")
+    printnow("defining pulse picker...\n")
+  except ImportError:
+    warning("Module is not available")
+  printnow("... done\n")
+except:
+  warning('issue with EventSequencer, we also will not have the pulse picker')
+
+printnow("defining cxilaser ...")
+from blbase import lasersystem
+# LaserSystem does not work because LAS:FS5:REG:Angle:Shift:rd no longer exists
+#try:
+#  cxilaser=lasersystem.LaserSystem(system=5,beamline="cxi")
+#  laser = cxilaser
+#  las = cxilaser
+#  export("cxilaser", "laser", "las")
+#except:
+#  warning('Problems with the lasersystem, likely PVs etc')
+try:
+  vitara = lasersystem.Vitara(edm=config.EPICS_HUTCH_SCREENS+"vitara_screen")
+  export("vitara")
+except Exception, exc:
+  print exc
+  warning('Problems with the vitara, likely PVs etc')
+
+try:
+  def clear_sequencer():
+    """Clear sequencer of old values.
+    """
+    for seqstep in range(20):
+        event.setstep(seqstep, 0, 0,fiducial=0,comment=' ');seqstep+=1
+    event.update()
+  
+  export("clear_sequencer")
+except:
+  warning("importing clear_sequencer function failed ... \n")
+
+try:
+  def setLaserDrop(NshotsPerDrop, NshotsOff=1, seq=event, codes=dict(lason=183,lasoff=184)):
+    if NshotsPerDrop<1:
+      print 'this should be a positive integer!'
+      return
+    seqstep = 0
+    seq.setstep(seqstep,codes['lason'],1,fiducial=0,comment='LaserOn');seqstep+=1
+    for shotNo in range(NshotsOff):
+      seq.setstep(seqstep,codes['lasoff'],1,fiducial=0,comment='LaserOff');seqstep+=1
+    for shotNo in range(NshotsPerDrop-1):
+      seq.setstep(seqstep,codes['lason'],1,fiducial=0,comment='LaserOn');seqstep+=1
+    seq.setnsteps(seqstep)
+    seq.update()
+    printnow("... done\n")
+  export("setLaserDrop")
+except:
+  warning("importing laser drop function failed ... \n")
+
+try:
+  printnow("Defining laser_sequencer macros...")
+  from blbase.lasersequence import LaserSequence
+  laser_sequence = LaserSequence(event, on_code=183, off_code=184)
+  export("laser_sequence")
+  printnow("... done\n")
+except:
+  warning("defining laser_sequencer macros failed!")
+
+printnow("defining daq...")
+try:
+    from blbase import daq
+    pvbase = "{0}:SCAN:".format(config.hutch.upper())
+    feedbackPVs = dict(
+        istep=(pvbase + "ISTEP",0), isscan=(pvbase + "ISSCAN",0),
+        var0=(pvbase + "SCANVAR00",""), var0_max=(pvbase + "MAX00",0),
+        var0_min=(pvbase + "MIN00",0), var1=(pvbase + "SCANVAR01",""),
+        var1_max=(pvbase + "MAX01",0), var1_min=(pvbase + "MIN01",0),
+        var2=(pvbase + "SCANVAR02",""), var2_max=(pvbase + "MAX02",0),
+        var2_min=(pvbase + "MIN02",0), Nshots=(pvbase + "NSHOTS",0),
+        Nsteps=(pvbase + "NSTEPS",0))
+    daq = daq.Daq(host=config.host, platform=4, lcls=lcls_linac, feedbackPVs=feedbackPVs, sequencer=event)
+    export("daq")
+    from blutil.fit import DaqFit
+    daqfit = DaqFit(daq)
+    printnow("...done\n")
+except Exception, exc:
+    daq = None
+    warning("Error loading daq!")
+    print exc
+
+printnow("defining OPO shifter...")
+try:
+    shift_path = "/reg/neh/home/trendahl/Python_Scripts/evr"
+    sys.path.append(shift_path)
+    from evr import Shifter
+    opo_shifter = Shifter("CXI:R52:EVR:01:TRIG0",
+                          "CXI:R52:EVR:01:TRIG1")
+    export('opo_shifter')
+    printnow("...done\n")
+
+except Exception, exc:
+    opo_shifter = None
+    warning("Error loading opo_shifter")
+    print exc
+
+
+
+printnow("defining epics archiver...")
+try:
+    from blutil import epicsarchive_new
+    epicsarchive = epicsarchive_new.EpicsArchive()
+    export("epicsarchive")
+    printnow("...done\n")
+except Exception, exc:
+    warning("Error loading epics archiver!")
+    print exc
+

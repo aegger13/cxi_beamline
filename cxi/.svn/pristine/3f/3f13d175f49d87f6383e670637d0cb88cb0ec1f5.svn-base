@@ -1,0 +1,252 @@
+import os
+import time
+import traceback
+import datetime
+import numpy as np
+import random
+import psp.Pv as Pv
+import blbase.daq
+from blbase.motor import Motor
+from blbase.virtualmotor import VirtualMotor
+from pswww import pypsElog
+import beamline as env
+
+expname = os.path.basename(__file__).split(".")[0]
+
+class pi_velocity_context(object):
+    def __init__(self, pimotor, velocity):
+        self.pimotor = pimotor
+        self.velocity = velocity
+        self.original_velocity = pimotor.get_velocity()
+  
+    def __enter__(self):
+        self.pimotor.set_velocity(self.velocity)
+  
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.pimotor.set_velocity(self.original_velocity)
+
+
+class Experiment(object):
+    def __init__(self):
+        self.expname = expname[3:]
+        self.elog = pypsElog.pypsElog()
+        env.motors.add( ["CXI:SC3:MMS:02","Sample_x"],
+                        ["CXI:SC3:MMS:03","Sample_y"],
+                        ["CXI:SC3:MMS:04","Sample_z"],
+                        ["CXI:SC3:MMC:16","Sample_phi"],
+                        ["CXI:SC3:MMS:12","crystal_x"],
+                        ["CXI:SC3:MMS:11","crystal_y"],
+                        group="user") 
+#        env.motors.add( ["CXI:SC2:MMS:02","Sample_x"],
+#                        ["CXI:SC2:MMS:05","Sample_y"],
+#                        ["CXI:SC2:MMS:06","Sample_z"],
+#                        ["CXI:SC2:MMC:01","Sample_phi"],
+#                        ["CXI:SC2:MMS:07","crystal_x"],
+#                        ["CXI:SC2:MMS:08","crystal_y"],
+#                        group="user") 
+        self.center = 125
+        env.daq.add_readout_checks("Sc2Epix","Sc2Imp")
+    
+    def tomo_fly_scan(self, fly_start, fly_end, dist_per_shot, lat_start, lat_rows, lat_step_size, angle_min, angle_max, numAngles):
+        angles = np.linspace(angle_min, angle_max, numAngles)
+        for angleTarget in angles:
+            
+            xpp.motors.gon_r.umv(angleTarget)
+            while not xpp.motors.gon_r.at_pos(angleTarget):
+                xpp.motors.gon_r.umv(angleTarget)
+            print('starting '+str(angleTarget)+' degrees scan')
+            self.fly_scan(fly_start, fly_end, dist_per_shot, lat_start, lat_rows, lat_step_size/np.cos(angleTarget*np.pi/180), angle_compensate=False)
+            
+            
+            print(str(angleTarget)+' degrees finished')
+            time.sleep(2)
+            
+        print('Tomo scan finished')
+  
+    def fly_scan(self, fly_start, fly_end, dist_per_shot, lat_start, lat_rows, lat_step_size, angle_compensate=True, beam_rate=120):
+        """
+        Fly scan
+        """
+        log = "#\n# x.fly_scan({0}, {1}, {2}, {3}, {4}, {5}, angle_compensate={6}, beam_rate={7})\n".format(fly_start, fly_end, dist_per_shot, lat_start, lat_rows, lat_step_size, angle_compensate, beam_rate)
+        log += "#\n# " + self.gon_status() + "\n#\n"
+        env.daq.starttime = datetime.datetime.now()
+        fly_motor = self.pi03
+        lat_motor = self.pi01
+        comp_motor = self.pi02
+    
+        print "Starting fly_scan."
+        fly_original = fly_motor.wm()
+        lat_original = lat_motor.wm()
+        print "Moving motors {0} and {1} to starting positions {2} and {3}...".format(fly_motor, lat_motor, fly_start, lat_start)
+        fly_motor.mv(fly_start)
+        lat_motor.mv(lat_start)
+        if angle_compensate:
+            comp_motor.mv(self._comp_z(lat_start))
+        last_pos, next_pos = fly_start, fly_end
+        daq = env.daq
+        print "Connecting to daq..."
+        daq.connect()
+        velocity = dist_per_shot * beam_rate
+        config_details = dict(
+            events=0,
+            use_l3t=True)
+        print "Configuring daq..."
+        daq.configure(**config_details)
+    
+        base_pts = [ lat_start + i*lat_step_size for i in range(lat_rows) ]
+        if angle_compensate:
+            comp_pts = [ self._comp_z(lat) for lat in base_pts ]
+            lat_pts = [ self._new_lat(lat) for lat in base_pts ]
+        else:
+            lat_pts = base_pts
+    
+        next_base = base_pts[0]
+        next_lat = lat_pts[0]
+    
+        with blbase.daq.EpicsFeedbackContext(daq.feedback):
+          daq.write_feedback_pvs((lat_motor, fly_motor), lat_pts, 0, 0)
+          fly_motor.wait()
+          lat_motor.wait()
+          comp_motor.wait()  
+          time.sleep(2) # avoid weird issues with data at the start of the scan
+          print "Begin scan:"
+          try:
+              with pi_velocity_context(fly_motor, velocity):
+                  daq.begin(**config_details)
+                  time.sleep(2) # deal with the daq being slow to start taking data
+                  for i in range(lat_rows):
+                      txt = "Scanning row {0} of {1}, {2} from {3} to {4} at {5}={6}..."
+                      if angle_compensate:
+                          msg = txt.format(i+1, lat_rows, fly_motor, last_pos, next_pos, "angle_comp_x", next_base)
+                      else:
+                          msg = txt.format(i+1, lat_rows, fly_motor, last_pos, next_pos, lat_motor, next_lat)
+                      print msg
+                      log += "# " + msg + "\n"
+                      daq.write_feedback_step_pvs(i)
+                      fly_motor.mv(next_pos)
+                      last_pos, next_pos = next_pos, last_pos
+                      fly_motor.wait()
+                      try:
+                          next_lat = lat_pts[i+1]
+                          if angle_compensate:
+                              next_base = base_pts[i+1]
+                              next_comp = comp_pts[i+1]
+                      except Exception:
+                          print "Done with fly_scan, return motors to original positions..."
+                          break
+                      lat_motor.mv(next_lat)
+                      if angle_compensate:
+                          comp_motor.mv(next_comp)
+                          comp_motor.wait()
+                      lat_motor.wait()
+          except Exception:
+              traceback.print_exc()
+              err = "Error in scan, aborting..."
+              log += "#" + err + "\n"
+              print err
+          except KeyboardInterrupt:
+              err = "Scan interrupted by ctrl+c, aborting..."
+              log += "#" + err + "\n"
+              print err
+        try:
+            daq.stop()
+        except:
+            pass
+        
+        runnum = env.daq.runnumber()
+        if env.daq.isRecording() and post is not False:
+            self.elog.submit(message, runnum=runnum)
+        
+        fly_motor.mv(fly_original)
+        lat_motor.mv(lat_original)
+        daq._Daq__scanstr = log
+        daq.savelog()
+        print "Done"
+  
+    def mesh_scan(self, row_start, num_rows, row_step_size, coll_start, num_colls, coll_step_size=None, events_per_point=10, randomness=0.0, angle_compensate=True, use_l3t=True):
+        row_motor = self.pi01
+        coll_motor = self.pi03
+        comp_motor = self.pi02
+    
+        if coll_step_size is None:
+            coll_step_size = row_step_size
+    
+        row_end = row_start + (num_rows-1)*row_step_size
+        coll_end = coll_start + (num_colls-1)*coll_step_size
+    
+        self.setup_event_sequencer(events_per_point)
+    
+        if angle_compensate:
+            # One row, one collumn
+            row = [ row_start + row_step_size*i for i in range(num_rows) ]
+            coll = [ coll_start + coll_step_size*i for i in range(num_colls) ]
+            # Have row stay in place while coll moves through every position
+            row_pts = []
+            for pt in row:
+                row_pts.extend([pt]*len(coll))
+            # Calculate compensation
+            comp_pts = [ self._comp_z(lat) for lat in row_pts ]
+            row_pts = [ self._new_lat(lat) for lat in row_pts ]
+            # Have coll move back and forth
+            coll_rev = list(coll) # implicit copy
+            coll_rev.reverse()
+            coll_pts = []
+            for i in range(num_colls):
+                if i % 2:
+                    coll_pts.extend(coll_rev)
+                else:
+                    coll_pts.extend(coll)
+    
+            env.daq.a3scan_with_list(row_motor, row_pts, coll_motor, coll_pts, comp_motor, comp_pts, events_per_point, sequencer=True, use_l3t=use_l3t, log_data=self.gon_status())
+    
+        elif randomness>0:
+            row = [ row_start + row_step_size*i for i in range(num_rows) ]
+            coll = [ coll_start + coll_step_size*i for i in range(num_colls) ]
+            # Have row stay in place while coll moves through every position
+            row_pts = []
+            for pt in row:
+                row_pts.extend([pt]*len(coll))
+    
+            # Have coll move back and forth
+            coll_rev = list(coll) # implicit copy
+            coll_rev.reverse()
+            coll_pts = []
+            for i in range(num_colls):
+                if i % 2:
+                    coll_pts.extend(coll_rev)
+                else:
+                    coll_pts.extend(coll)
+    
+            for i in range(len(row_pts)):
+                row_pts[i] += (2*random.random()-1)*randomness
+    
+            for i in range(len(coll_pts)):
+                coll_pts[i] += (2*random.random()-1)*randomness
+            env.daq.a2scan_with_list(row_motor, row_pts, coll_motor, coll_pts, events_per_point, sequencer=True, use_l3t=use_l3t, log_data=self.gon_status())
+    
+        else:
+            env.daq.mesh2D(row_motor, row_start, row_end, num_rows-1, coll_motor, coll_start, coll_end, num_colls-1, events_per_point, sequencer=True, use_l3t=use_l3t, log_data=self.gon_status())
+    
+    def _new_lat(self, lat_orig):
+        angle = xpp.m.gon_r.wm()
+        center = self.center
+        return (lat_orig-center) * np.cos(angle*np.pi/180) + center
+  
+    def _comp_z(self, lat_orig):
+        angle = xpp.m.gon_r.wm()
+        center = self.center
+        return (lat_orig-center) * -np.sin(angle*np.pi/180) + center
+  
+    def setup_event_sequencer(self, Nshots, Nbursts=1):
+        # Set up sequencer to do pulse picker
+        xpp.pp.prepare_burst(Nshots,Nbursts=Nbursts,burstMode=True)
+        # Make sure sync marker is at 120 Hz... this gets messed up sometimes?
+        xpp.event.setSyncMarker(120)
+  
+    def gon_status(self):
+        m = xpp.motors
+        txt = "gon_r: {0:.3f}, gon_x: {1:.3f}, gon_y: {2:.3f}, gon_z: {3:.3f}"
+        return txt.format(m.gon_r.wm(), m.gon_x.wm(), m.gon_y.wm(), m.gon_z.wm())
+  
+  
+
